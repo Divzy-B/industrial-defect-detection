@@ -38,3 +38,12 @@ def test_decode_rejects_empty_and_invalid_payloads() -> None:
         decode_image(b"")
     with pytest.raises(ImageDecodeError):
         decode_image(b"not an image")
+
+
+def test_decode_rejects_an_image_over_the_pixel_limit() -> None:
+    image = np.zeros((10, 11, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+
+    with pytest.raises(ImageDecodeError, match="100 pixel"):
+        decode_image(encoded.tobytes(), max_pixels=100)

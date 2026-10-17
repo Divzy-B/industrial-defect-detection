@@ -6,7 +6,9 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from starlette.concurrency import run_in_threadpool
 
+from industrial_defect_detection import __version__
 from industrial_defect_detection.config import Settings
 from industrial_defect_detection.inference import Detector, InferenceError, create_detector
 from industrial_defect_detection.schemas import DetectionResponse
@@ -16,8 +18,6 @@ from industrial_defect_detection.vision import ImageDecodeError
 
 def create_app(detector_factory: Callable[[Settings], Detector] = create_detector) -> FastAPI:
     """Create an API whose model loads once, during application startup."""
-    settings = Settings.from_env()
-
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.load_model()
@@ -25,20 +25,27 @@ def create_app(detector_factory: Callable[[Settings], Detector] = create_detecto
 
     app = FastAPI(
         title="Industrial Defect Detection API",
-        version="0.1.0",
+        version=__version__,
         description="YOLOv8 defect detection over PyTorch or ONNX Runtime.",
         lifespan=lifespan,
     )
     app.state.service = None
+    app.state.settings = None
     app.state.model_error = None
 
     def load_model() -> None:
         try:
-            app.state.service = DetectionService(detector_factory(settings))
+            settings = Settings.from_env()
+            settings.validate()
+            app.state.service = DetectionService(
+                detector_factory(settings), max_image_pixels=settings.max_image_pixels
+            )
+            app.state.settings = settings
             app.state.model_error = None
         except (InferenceError, ValueError) as exc:
             # Keep /healthz available so orchestrators receive a useful error.
             app.state.service = None
+            app.state.settings = None
             app.state.model_error = str(exc)
 
     app.state.load_model = load_model
@@ -55,6 +62,16 @@ def create_app(detector_factory: Callable[[Settings], Detector] = create_detecto
     def root() -> dict[str, str]:
         return {"service": "industrial-defect-detection", "docs": "/docs"}
 
+    @app.get("/readyz", tags=["operations"])
+    def readyz() -> dict[str, str]:
+        """Report whether this process can accept inference requests."""
+        settings = app.state.settings
+        if app.state.service is None or settings is None:
+            raise HTTPException(
+                status_code=503, detail=app.state.model_error or "Model is unavailable."
+            )
+        return {"status": "ok"}
+
     @app.post("/v1/detect", response_model=DetectionResponse, tags=["inference"])
     async def detect(
         image: UploadFile = File(..., description="JPEG, PNG, or another OpenCV-decodable image."),
@@ -66,18 +83,24 @@ def create_app(detector_factory: Callable[[Settings], Detector] = create_detecto
         del (
             confidence
         )  # Threshold is intentionally configured at process start for reproducibility.
-        if app.state.service is None:
+        settings = app.state.settings
+        if app.state.service is None or settings is None:
             raise HTTPException(
                 status_code=503, detail=app.state.model_error or "Model is unavailable."
             )
-        payload = await image.read(settings.max_upload_bytes + 1)
+        try:
+            payload = await image.read(settings.max_upload_bytes + 1)
+        finally:
+            await image.close()
         if len(payload) > settings.max_upload_bytes:
             raise HTTPException(
                 status_code=413,
                 detail=f"Image exceeds {settings.max_upload_bytes} byte upload limit.",
             )
         try:
-            return app.state.service.inspect_bytes(payload, include_annotation=annotate)
+            return await run_in_threadpool(
+                app.state.service.inspect_bytes, payload, include_annotation=annotate
+            )
         except ImageDecodeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except InferenceError as exc:

@@ -14,6 +14,7 @@ DEFAULT_CLASS_NAMES = (
     "rolled-in_scale",
     "scratches",
 )
+DEFAULT_MAX_IMAGE_PIXELS = 40_000_000
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class Settings:
     iou: float
     image_size: int
     max_upload_bytes: int
+    max_image_pixels: int
     class_names: tuple[str, ...]
 
     @classmethod
@@ -39,6 +41,9 @@ class Settings:
             iou=float(os.getenv("DEFECT_IOU", "0.45")),
             image_size=int(os.getenv("DEFECT_IMAGE_SIZE", "640")),
             max_upload_bytes=int(os.getenv("DEFECT_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
+            max_image_pixels=int(
+                os.getenv("DEFECT_MAX_IMAGE_PIXELS", str(DEFAULT_MAX_IMAGE_PIXELS))
+            ),
             class_names=names or DEFAULT_CLASS_NAMES,
         )
 
@@ -49,7 +54,9 @@ class Settings:
             raise ValueError("DEFECT_CONFIDENCE must be between 0 and 1")
         if not 0 < self.iou < 1:
             raise ValueError("DEFECT_IOU must be between 0 and 1")
-        if self.image_size < 32:
-            raise ValueError("DEFECT_IMAGE_SIZE must be at least 32")
+        if self.image_size < 32 or self.image_size % 32:
+            raise ValueError("DEFECT_IMAGE_SIZE must be a multiple of 32 and at least 32")
         if self.max_upload_bytes < 1:
             raise ValueError("DEFECT_MAX_UPLOAD_BYTES must be positive")
+        if self.max_image_pixels < 1:
+            raise ValueError("DEFECT_MAX_IMAGE_PIXELS must be positive")

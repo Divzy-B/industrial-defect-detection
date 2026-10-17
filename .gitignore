@@ -15,6 +15,7 @@ data/raw/
 data/processed/
 models/*.pt
 models/*.onnx
+models/*.manifest.json
 !models/.gitkeep
 *.log
 .DS_Store
