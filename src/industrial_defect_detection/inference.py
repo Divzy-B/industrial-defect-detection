@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 from pathlib import Path
 from typing import Protocol
 
@@ -100,7 +101,9 @@ class OnnxDetector:
             )
         except Exception as exc:  # pragma: no cover - environment-specific
             raise InferenceError(f"Could not load ONNX model: {exc}") from exc
-        return cls(session=session, input_name=session.get_inputs()[0].name, settings=settings)
+        input_metadata = session.get_inputs()[0]
+        _validate_onnx_input_shape(input_metadata.shape, settings.image_size)
+        return cls(session=session, input_name=input_metadata.name, settings=settings)
 
     def detect(self, image: np.ndarray) -> list[Detection]:
         tensor, scale, pad_x, pad_y = _preprocess(image, self.settings.image_size)
@@ -136,6 +139,25 @@ def _ensure_model_exists(path: Path) -> None:
             f"Model file '{path}' was not found. Mount or copy trained weights and set "
             "DEFECT_MODEL_PATH."
         )
+
+
+def _validate_onnx_input_shape(shape: object, image_size: int) -> None:
+    """Fail early when a fixed-shape export disagrees with runtime preprocessing."""
+    if not isinstance(shape, list | tuple) or len(shape) != 4:
+        raise InferenceError(f"ONNX input must be NCHW with four dimensions, got {shape!r}")
+    channels, height, width = shape[1:]
+    if isinstance(channels, Integral) and channels != 3:
+        raise InferenceError(f"ONNX input must have three color channels, got {channels}")
+    if isinstance(height, Integral) and isinstance(width, Integral):
+        if height != width:
+            raise InferenceError(
+                f"Only square YOLOv8 ONNX inputs are supported, got {height}x{width}."
+            )
+        if height != image_size:
+            raise InferenceError(
+                f"ONNX model expects {height}x{width}, but DEFECT_IMAGE_SIZE is {image_size}. "
+                "Export with the configured size or update DEFECT_IMAGE_SIZE."
+            )
 
 
 def _make_detection(
@@ -176,15 +198,20 @@ def _decode_yolov8_output(
     labels: dict[int, str],
 ) -> list[Detection]:
     """Decode common YOLOv8 detect-export layouts: (1, 4+C, N) or (1, N, 4+C)."""
-    predictions = np.squeeze(output)
-    if predictions.ndim != 2:
+    if output.ndim != 3 or output.shape[0] != 1:
         raise InferenceError(f"Unexpected ONNX output shape: {output.shape}")
-    # Standard Ultralytics ONNX output is (features, candidates). The second
-    # check also makes tiny synthetic/low-candidate outputs unambiguous.
-    if predictions.shape[0] < predictions.shape[1] or predictions.shape[1] < 5:
+    predictions = output[0]
+    expected_features = 4 + len(labels)
+    if predictions.shape[1] == expected_features:
+        pass
+    elif predictions.shape[0] == expected_features:
         predictions = predictions.T
-    if predictions.shape[1] < 5:
-        raise InferenceError(f"ONNX output needs xywh plus class scores, got {predictions.shape}")
+    else:
+        raise InferenceError(
+            "ONNX output class count does not match DEFECT_CLASS_NAMES: "
+            f"expected {expected_features} features (xywh + {len(labels)} classes), "
+            f"got {predictions.shape}."
+        )
 
     boxes_xywh: list[list[int]] = []
     scores: list[float] = []

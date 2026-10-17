@@ -14,13 +14,18 @@ class ImageDecodeError(ValueError):
     """Raised when a client payload is not a decodable raster image."""
 
 
-def decode_image(payload: bytes) -> np.ndarray:
+def decode_image(payload: bytes, *, max_pixels: int | None = None) -> np.ndarray:
     """Decode image bytes to a non-empty BGR OpenCV array."""
     if not payload:
         raise ImageDecodeError("The uploaded file is empty.")
-    image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    try:
+        image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except cv2.error as exc:
+        raise ImageDecodeError("The uploaded file is not a supported image.") from exc
     if image is None or image.size == 0:
         raise ImageDecodeError("The uploaded file is not a supported image.")
+    if max_pixels is not None and image.shape[0] * image.shape[1] > max_pixels:
+        raise ImageDecodeError(f"The uploaded image exceeds the {max_pixels:,} pixel limit.")
     return image
 
 

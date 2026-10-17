@@ -58,7 +58,10 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate
 # macOS/Linux: source .venv/bin/activate
 pip install -e ".[all,dev]"
-copy .env.example .env  # macOS/Linux: cp .env.example .env
+# Windows PowerShell
+Copy-Item .env.example .env
+# macOS/Linux
+cp .env.example .env
 ```
 
 Place a model at `models/best.pt` (or change `DEFECT_MODEL_PATH` in `.env`), then:
@@ -98,7 +101,10 @@ Example response (boxes are in the original image's pixels):
 
 `GET /healthz` remains available even if the model is missing, reporting a
 `degraded` state and actionable configuration detail. Images default to a 10 MiB
-limit; change `DEFECT_MAX_UPLOAD_BYTES` only after assessing operational risk.
+limit and 40 megapixels after decoding; change `DEFECT_MAX_UPLOAD_BYTES` or
+`DEFECT_MAX_IMAGE_PIXELS` only after assessing operational risk. `GET /readyz`
+returns `503` until the model is loaded and is the correct endpoint for a
+container readiness probe.
 
 ## Backends
 
@@ -118,7 +124,11 @@ set DEFECT_BACKEND=onnx  # Windows PowerShell: $env:DEFECT_BACKEND = "onnx"
 
 The ONNX adapter accepts standard YOLOv8 detection exports in `(1, 4+C, N)` or
 `(1, N, 4+C)` layout, applies letterbox reversal, confidence filtering, and
-class-aware rendering after OpenCV NMS.
+class-aware rendering after OpenCV NMS. Set `DEFECT_CLASS_NAMES` to the exact
+class order used by the exported model; the service rejects a class-count
+mismatch instead of returning incorrectly labeled defects. For a fixed-shape
+export, `DEFECT_IMAGE_SIZE` must equal its square input dimension. The PyTorch
+backend reads class names embedded in the checkpoint.
 
 ## Train
 
@@ -126,12 +136,26 @@ Prepare an Ultralytics-format dataset outside the repository, review its license
 then adapt [`data/neu_steel.yaml`](data/neu_steel.yaml):
 
 ```bash
-python scripts/train.py --data /absolute/path/to/data.yaml --epochs 80 --imgsz 640 --batch 16
+python scripts/train.py --data /absolute/path/to/data.yaml --epochs 80 --imgsz 640 --batch 16 --seed 42
 ```
 
 Ultralytics writes results below `runs/train/`; promote only a reviewed `best.pt`
 to your model registry or mounted `models/` directory. Never publish plant images
-or model artifacts without checking confidentiality and data permissions.
+or model artifacts without checking confidentiality and data permissions. The
+training command defaults to deterministic operations where supported and writes
+`training_manifest.json` into the completed run. Keep that manifest with the
+model: it records the dataset-YAML hash, seed, run options, runtime versions, and
+source commit without copying dataset contents.
+
+The ONNX exporter writes a matching `*.manifest.json` beside the model, including
+the checkpoint SHA-256, embedded class order, and export parameters:
+
+```bash
+python scripts/export_onnx.py models/best.pt --imgsz 640 --simplify
+```
+
+Model files and their manifests are intentionally ignored by Git; register both
+in your approved model store.
 
 ## Docker
 
@@ -146,6 +170,8 @@ docker compose up --build
 
 The bundled image targets CPU inference. For NVIDIA deployment, use a CUDA base
 image and validate the matching PyTorch, driver, and container-runtime versions.
+The service runs as an unprivileged container user; Docker Compose marks the API
+healthy only once `/readyz` can serve inference.
 
 ## Quality checks
 
@@ -157,7 +183,10 @@ pytest
 
 CI runs these checks on Python 3.10, 3.11, and 3.12. Tests use a fake detector;
 they verify request validation, response shape, OpenCV image handling, annotation,
-and ONNX-output decoding without bundling a proprietary model.
+and ONNX-output decoding without bundling a proprietary model. Within one
+process, model calls are serialized to avoid unsafe concurrent access to a shared
+runtime session; scale inference by adding worker processes after measuring your
+target hardware and model.
 
 ## Repository layout
 
